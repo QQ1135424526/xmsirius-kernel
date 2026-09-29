@@ -96,22 +96,41 @@ jobs:
       - name: '5. 下载 clang 工具链'
         run: |
           mkdir -p tc && cd tc
-          URL="https://github.com/ZyCromerZ/Clang/releases/download/${{ inputs.clang_ver }}-release/Clang-${{ inputs.clang_ver }}.tar.gz"
-          echo "下载: $URL"
-          curl -fL --retry 3 -o clang.tar.gz "$URL"
+
+          # 首选 AOSP 官方 clang —— 与设备内核完全一致（clang 21.0.0 / based on r563880c）。
+          # 设备内核的 /proc/version 明确写着这个版本，用它编出来的一定能对上。
+          AOSP_URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r563880c.tar.gz"
+          ZY_URL="https://github.com/ZyCromerZ/Clang/releases/download/${{ inputs.clang_ver }}-release/Clang-${{ inputs.clang_ver }}.tar.gz"
+
+          echo "尝试 AOSP clang-r563880c ..."
+          if curl -fL --retry 2 --max-time 900 -o clang.tar.gz "$AOSP_URL" 2>/dev/null; then
+            echo "OK: 使用 AOSP clang-r563880c"
+            echo "CLANG_SRC=AOSP clang-r563880c" >> "$GITHUB_ENV"
+          else
+            echo "AOSP 下载失败，回退 ZyCromerZ Clang ${{ inputs.clang_ver }}"
+            curl -fL --retry 3 --max-time 900 -o clang.tar.gz "$ZY_URL"
+            echo "CLANG_SRC=ZyCromerZ ${{ inputs.clang_ver }}" >> "$GITHUB_ENV"
+          fi
           ls -lh clang.tar.gz
+
           mkdir -p clang
           tar -xzf clang.tar.gz -C clang
-          echo "== 解压后的顶层结构 =="
+          echo "== 解压后顶层 =="
           ls clang | head
-          # 兼容「tarball 里多套了一层目录」的情况
-          if [ ! -x clang/bin/clang ] && [ -x "$(find clang -maxdepth 3 -type f -name clang | head -1)" ]; then
-            INNER="$(dirname "$(dirname "$(find clang -maxdepth 3 -type f -name clang | head -1)")")"
-            echo "检测到嵌套目录: $INNER"
-            mv "$INNER" clang2 && rm -rf clang && mv clang2 clang
+
+          # 兼容「tarball 里多套了一层目录」
+          if [ ! -x clang/bin/clang ]; then
+            INNER="$(dirname "$(dirname "$(find clang -maxdepth 4 -type f -name clang | head -1)")")"
+            if [ -n "$INNER" ] && [ "$INNER" != "clang" ]; then
+              echo "检测到嵌套目录: $INNER"
+              mv "$INNER" clang2 && rm -rf clang && mv clang2 clang
+            fi
           fi
+
           echo "== clang 版本 =="
           ./clang/bin/clang --version || true
+          echo "== 默认汇编器配置（看是否 integrated-as）=="
+          ./clang/bin/clang -### -c -x assembler /dev/null 2>&1 | grep -oE 'integrated-as|"-[^"]*as[^"]*"|/bin/as' | head -5 || true
           echo "TC=$PWD/clang" >> "$GITHUB_ENV"
 
       - name: '6. 下载 GCC 工具链（32/64 位）'
