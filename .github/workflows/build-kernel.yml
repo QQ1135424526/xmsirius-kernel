@@ -246,6 +246,7 @@ jobs:
           #   导致 vDSO 构建失败 → vdso-offsets.h 不完整 → signal.c 报
           #   "use of undeclared identifier 'vdso_offset_sigtramp'"。
           #   -integrated-as 强制走 clang 自带汇编器，问题消失。
+          set +e
           make -j"${{ inputs.jobs }}" O=out ARCH=arm64 \
             CC="clang -integrated-as" \
             KCFLAGS="-gdwarf-4" \
@@ -262,6 +263,9 @@ jobs:
             Image.gz-dtb > /tmp/build.log 2>&1
           RC=$?
           echo "== make 退出码 $RC =="
+          echo "== 日志行数: $(wc -l < /tmp/build.log) =="
+          echo "== 日志开头 40 行（看是否一启动就失败）=="
+          head -40 /tmp/build.log
           echo "== 日志最后 150 行 =="
           tail -150 /tmp/build.log
           if [ "$RC" -ne 0 ]; then
@@ -270,11 +274,11 @@ jobs:
           fi
           exit $RC
 
-      - name: '8b. 失败时上传完整编译日志'
-        if: failure()
+      - name: '8b. 上传完整编译日志'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log-failed
+          name: build-log
           path: /tmp/build.log
           if-no-files-found: warn
           retention-days: 7
