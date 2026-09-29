@@ -71,7 +71,8 @@ jobs:
           cd kernel
           echo "== 旧版文件数 =="
           ls drivers/kernelsu | wc -l
-          rm -rf drivers/kernelsu
+          # 先挪走备份，万一新版装不上可以回退（仓库自带的 vendored 版本是能编译的）
+          mv drivers/kernelsu /tmp/ksu_orig
 
           if [ -n "${{ inputs.ksu_ref }}" ]; then
             git clone --depth=1 -b "${{ inputs.ksu_ref }}" \
@@ -82,7 +83,22 @@ jobs:
           echo "== rsuntk/KernelSU HEAD =="
           git -C /tmp/ksu log --oneline -1
 
-          cp -r /tmp/ksu/kernel drivers/kernelsu
+          # 关键：rsuntk 新版里 kernel/include/uapi 是【符号链接】，指向 kernel/ 目录之外。
+          # 只用 cp -r 会让链接悬空，编译时报：
+          #   drivers/kernelsu/ksu.c:4:10: fatal error: 'include/uapi/app_profile.h' file not found
+          # 必须用 cp -rL 解引用，把 uapi 实体化。
+          cp -rL /tmp/ksu/kernel drivers/kernelsu
+
+          echo "== 新版头文件完整性校验 =="
+          if [ -f drivers/kernelsu/include/uapi/app_profile.h ]; then
+            echo "  OK app_profile.h 存在"
+          else
+            echo "  !! 新版 KSU 头文件不全，回退到仓库自带版本"
+            rm -rf drivers/kernelsu
+            mv /tmp/ksu_orig drivers/kernelsu
+            echo "  KSU_UPGRADED=no" >> "$GITHUB_ENV"
+          fi
+          [ -d /tmp/ksu_orig ] && echo "  KSU_UPGRADED=yes" >> "$GITHUB_ENV"
 
           echo "== 新版文件数 =="
           ls drivers/kernelsu | wc -l
