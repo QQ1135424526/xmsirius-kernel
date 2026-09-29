@@ -149,6 +149,30 @@ jobs:
           echo "GCC64=$PWD/gcc64" >> "$GITHUB_ENV"
           echo "GCC32=$PWD/gcc32" >> "$GITHUB_ENV"
 
+      - name: '6b. 用新版 binutils 顶替 GCC 4.9 的 as'
+        run: |
+          # 背景：ZyCromerZ 的 clang 走外部汇编器，而内核按 CROSS_COMPILE 找到的是
+          # GCC 4.9 自带的 aarch64-linux-android-as（binutils 2.24）。clang 16 生成的
+          # 汇编是 DWARF-5 风格（.file 1 "x.c"），binutils 2.24 只认 DWARF-4 的
+          # .file "x.c"，于是报：
+          #   /tmp/vgettimeofday-*.s:3: Error: junk at end of line, first unrecognized
+          #   character is `"'  /  Error: file number less than one
+          # 解决：用 Ubuntu 的新版 aarch64 binutils 顶替，并软链成 android 前缀。
+          sudo apt-get install -y -qq binutils-aarch64-linux-gnu
+          mkdir -p tc/bin
+          for t in as ld objdump ar nm strip objcopy readelf ranlib; do
+            if [ -x "/usr/bin/aarch64-linux-gnu-$t" ]; then
+              ln -sf "/usr/bin/aarch64-linux-gnu-$t" "tc/bin/aarch64-linux-android-$t"
+            fi
+          done
+          echo "== 新版 binutils 版本 =="
+          aarch64-linux-gnu-as --version | head -1
+          echo "== 软链结果 =="
+          ls -l tc/bin/ | head
+          echo "== 确认软链生效 =="
+          ./tc/bin/aarch64-linux-android-as --version | head -1
+          echo "NEWBIN=$PWD/tc/bin" >> "$GITHUB_ENV"
+
       - name: '7. 生成 .config（合并 fragment）'
         run: |
           cd kernel
@@ -179,7 +203,9 @@ jobs:
           # 漏掉 gcc64/gcc32 会报 "aarch64-linux-android-objdump: not found"，
           # 并进一步导致 vDSO 构建失败、vdso-offsets.h 不完整、signal.c 报
           # "use of undeclared identifier 'vdso_offset_sigtramp'"。
-          export PATH="$TC/bin:$GCC64/bin:$GCC32/bin:$PATH"
+          # NEWBIN 必须排在最前：它里面是把新版 binutils 软链成 aarch64-linux-android-*
+          # 用来顶替 GCC 4.9 的 binutils 2.24（不认 clang 的 DWARF-5 .file 指令）
+          export PATH="$NEWBIN:$TC/bin:$GCC64/bin:$GCC32/bin:$PATH"
 
           export CC=clang
           export CLANG_TRIPLE=aarch64-linux-gnu-
@@ -188,11 +214,13 @@ jobs:
 
           echo "== 工具链自检 =="
           for t in clang ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-strip \
-                   aarch64-linux-android-objdump aarch64-linux-android-ld aarch64-linux-android-ar \
-                   arm-linux-androideabi-objdump arm-linux-androideabi-ld; do
+                   aarch64-linux-android-as aarch64-linux-android-objdump aarch64-linux-android-ld \
+                   aarch64-linux-android-ar arm-linux-androideabi-objdump arm-linux-androideabi-ld; do
             p="$(command -v $t 2>/dev/null)"
             if [ -n "$p" ]; then echo "  OK   $t -> $p"; else echo "  MISS $t"; fi
           done
+          echo "== 实际用的 as 版本（应为 2.3x，不是 2.24）=="
+          aarch64-linux-android-as --version | head -1
 
           set -o pipefail
           # CC 必须带 -integrated-as：
@@ -205,6 +233,7 @@ jobs:
           #   -integrated-as 强制走 clang 自带汇编器，问题消失。
           make -j"${{ inputs.jobs }}" O=out ARCH=arm64 \
             CC="clang -integrated-as" \
+            KCFLAGS="-gdwarf-4" \
             AS=clang \
             LD=ld.lld \
             AR=llvm-ar \
