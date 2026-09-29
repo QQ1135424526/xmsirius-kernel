@@ -99,18 +99,26 @@ jobs:
 
           # 首选 AOSP 官方 clang —— 与设备内核完全一致（clang 21.0.0 / based on r563880c）。
           # 设备内核的 /proc/version 明确写着这个版本，用它编出来的一定能对上。
-          AOSP_URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r563880c.tar.gz"
+          AOSP_BASE="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive"
+          AOSP_CANDIDATES="$AOSP_BASE/refs/heads/main/clang-r563880c.tar.gz $AOSP_BASE/refs/heads/master/clang-r563880c.tar.gz"
           ZY_URL="https://github.com/ZyCromerZ/Clang/releases/download/${{ inputs.clang_ver }}-release/Clang-${{ inputs.clang_ver }}.tar.gz"
 
-          echo "尝试 AOSP clang-r563880c ..."
-          if curl -fL --retry 2 --max-time 900 -o clang.tar.gz "$AOSP_URL" 2>/dev/null; then
-            echo "OK: 使用 AOSP clang-r563880c"
-            echo "CLANG_SRC=AOSP clang-r563880c" >> "$GITHUB_ENV"
-          else
-            echo "AOSP 下载失败，回退 ZyCromerZ Clang ${{ inputs.clang_ver }}"
+          GOT=""
+          for u in $AOSP_CANDIDATES; do
+            echo "尝试 AOSP: $u"
+            code=$(curl -sL -o clang.tar.gz -w '%{http_code}' --retry 1 --max-time 900 "$u" || echo 000)
+            echo "  HTTP $code  大小 $(stat -c %s clang.tar.gz 2>/dev/null || echo 0)"
+            if [ "$code" = "200" ] && [ -s clang.tar.gz ]; then
+              GOT="AOSP clang-r563880c"; break
+            fi
+          done
+          if [ -z "$GOT" ]; then
+            echo "AOSP 全部候选失败，回退 ZyCromerZ Clang ${{ inputs.clang_ver }}"
             curl -fL --retry 3 --max-time 900 -o clang.tar.gz "$ZY_URL"
-            echo "CLANG_SRC=ZyCromerZ ${{ inputs.clang_ver }}" >> "$GITHUB_ENV"
+            GOT="ZyCromerZ ${{ inputs.clang_ver }}"
           fi
+          echo "使用: $GOT"
+          echo "CLANG_SRC=$GOT" >> "$GITHUB_ENV"
           ls -lh clang.tar.gz
 
           mkdir -p clang
@@ -187,14 +195,16 @@ jobs:
           done
 
           set -o pipefail
-          # AS=clang 是必须的：
-          #   内核 vDSO 用 $(AS) 汇编 arch/arm64/kernel/vdso/*.o。若不覆盖，AS 会被推导成
-          #   GCC 4.9 自带的 aarch64-linux-android-as（binutils 2.24），而 clang 16 从 C
-          #   生成的汇编它不认识 —— 报 "junk at end of line, first unrecognized character
-          #   is `"'"，进而 vDSO 构建失败、vdso-offsets.h 不完整。
-          #   指向 clang 后走集成汇编器，问题消失。手写的 .S 由 $(CC) 处理，不受影响。
+          # CC 必须带 -integrated-as：
+          #   内核 vDSO 的规则是 cmd_vdsocc = ${CC} $(c_flags) -c -o $@ $<
+          #   （用的是 $(CC)，所以覆盖 AS= 没用）。ZyCromerZ 的 clang 是为内核定制的，
+          #   默认走外部汇编器 as —— 而 as 来自 GCC 4.9 的 binutils 2.24，不认识 clang 16
+          #   生成的汇编，报 "junk at end of line, first unrecognized character is `\"'"，
+          #   导致 vDSO 构建失败 → vdso-offsets.h 不完整 → signal.c 报
+          #   "use of undeclared identifier 'vdso_offset_sigtramp'"。
+          #   -integrated-as 强制走 clang 自带汇编器，问题消失。
           make -j"${{ inputs.jobs }}" O=out ARCH=arm64 \
-            CC=clang \
+            CC="clang -integrated-as" \
             AS=clang \
             LD=ld.lld \
             AR=llvm-ar \
