@@ -238,7 +238,6 @@ jobs:
           echo "== 实际用的 as 版本（应为 2.3x，不是 2.24）=="
           aarch64-linux-android-as --version | head -1
 
-          set -o pipefail
           # CC 必须带 -integrated-as：
           #   内核 vDSO 的规则是 cmd_vdsocc = ${CC} $(c_flags) -c -o $@ $<
           #   （用的是 $(CC)，所以覆盖 AS= 没用）。ZyCromerZ 的 clang 是为内核定制的，
@@ -260,9 +259,16 @@ jobs:
             READELF=llvm-readelf \
             CROSS_COMPILE="$CROSS_COMPILE" \
             CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
-            Image.gz-dtb 2>&1 | tee /tmp/build.log | tail -150
-          echo "== 编译结束（完整日志已存 /tmp/build.log）=="
-          wc -l /tmp/build.log
+            Image.gz-dtb > /tmp/build.log 2>&1
+          RC=$?
+          echo "== make 退出码 $RC =="
+          echo "== 日志最后 150 行 =="
+          tail -150 /tmp/build.log
+          if [ "$RC" -ne 0 ]; then
+            echo "== 关键错误行 =="
+            grep -nE 'error:|Error [0-9]|fatal error|No rule to make|make(\[[0-9]+\])?: \*\*\*|undefined reference|LLVM ERROR|No space left' /tmp/build.log | head -30
+          fi
+          exit $RC
 
       - name: '8b. 失败时上传完整编译日志'
         if: failure()
