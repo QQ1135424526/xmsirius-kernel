@@ -168,8 +168,15 @@ jobs:
           done
 
           set -o pipefail
+          # AS=clang 是必须的：
+          #   内核 vDSO 用 $(AS) 汇编 arch/arm64/kernel/vdso/*.o。若不覆盖，AS 会被推导成
+          #   GCC 4.9 自带的 aarch64-linux-android-as（binutils 2.24），而 clang 16 从 C
+          #   生成的汇编它不认识 —— 报 "junk at end of line, first unrecognized character
+          #   is `"'"，进而 vDSO 构建失败、vdso-offsets.h 不完整。
+          #   指向 clang 后走集成汇编器，问题消失。手写的 .S 由 $(CC) 处理，不受影响。
           make -j"${{ inputs.jobs }}" O=out ARCH=arm64 \
             CC=clang \
+            AS=clang \
             LD=ld.lld \
             AR=llvm-ar \
             NM=llvm-nm \
