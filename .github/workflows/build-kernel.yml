@@ -1,0 +1,186 @@
+name: Build xmsirius kernel (KernelSU upgrade)
+
+# 用途：在 GitHub 云端编译 MI 8 SE (xmsirius) 的内核，并把 KernelSU 升级到指定版本。
+# 产物：Image.gz-dtb（内核 + appended DTB），供后续用 magiskboot 塞回 boot.img。
+#
+# 用法：Actions → 选本 workflow → Run workflow → 填参数 → 运行。
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: '内核分支（Rocky7842/android_kernel_xiaomi_sdm710）'
+        required: true
+        default: 'lineage-23.2-ksu'
+      ksu_ref:
+        description: 'rsuntk/KernelSU 的 tag 或 commit（留空 = main 最新）'
+        required: false
+        default: 'v3.2.2-10-legacy'
+      clang_ver:
+        description: 'ZyCromerZ Clang 版本（形如 16.0.6-20260807）'
+        required: true
+        default: '16.0.6-20260807'
+      jobs:
+        description: '并行编译任务数（4 = runner 核数）'
+        required: true
+        default: '4'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+
+    steps:
+      - name: '0. 环境与磁盘'
+        run: |
+          echo "== CPU / 内存 =="; nproc; free -h
+          echo "== 磁盘（清理前）=="; df -h /
+
+      - name: '1. 清理 runner 磁盘（腾出空间）'
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /usr/local/share/boost /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/chromium /usr/local/lib/node_modules 2>/dev/null || true
+          sudo apt-get clean
+          echo "== 磁盘（清理后）=="; df -h /
+
+      - name: '2. 安装构建依赖'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            bc bison build-essential ccache curl flex git gnupg gperf imagemagick \
+            lib32ncurses5-dev lib32readline-dev lib32z1-dev libelf-dev liblz4-tool \
+            libncurses5 libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils \
+            lzop pngcrush python3 python-is-python3 rsync schedtool squashfs-tools \
+            xsltproc zip zlib1g-dev
+
+      - name: '3. 克隆内核源码'
+        run: |
+          git clone --depth=1 -b "${{ inputs.kernel_branch }}" \
+            https://github.com/Rocky7842/android_kernel_xiaomi_sdm710 kernel
+          cd kernel
+          echo "== 内核版本 =="
+          head -5 Makefile
+          echo "== HEAD =="
+          git log --oneline -1
+          echo "== KSU 配置（升级前）=="
+          grep -n -iE 'KSU' arch/arm64/configs/xiaomi/sdm710-common.config || true
+
+      - name: '4. 升级 KernelSU（替换 drivers/kernelsu）'
+        run: |
+          cd kernel
+          echo "== 旧版文件数 =="
+          ls drivers/kernelsu | wc -l
+          rm -rf drivers/kernelsu
+
+          if [ -n "${{ inputs.ksu_ref }}" ]; then
+            git clone --depth=1 -b "${{ inputs.ksu_ref }}" \
+              https://github.com/rsuntk/KernelSU /tmp/ksu
+          else
+            git clone --depth=1 https://github.com/rsuntk/KernelSU /tmp/ksu
+          fi
+          echo "== rsuntk/KernelSU HEAD =="
+          git -C /tmp/ksu log --oneline -1
+
+          cp -r /tmp/ksu/kernel drivers/kernelsu
+
+          echo "== 新版文件数 =="
+          ls drivers/kernelsu | wc -l
+          ls drivers/kernelsu
+          echo "== 接线检查（必须各有一行）=="
+          grep -n 'drivers/kernelsu/Kconfig' drivers/Kconfig
+          grep -n 'kernelsu/' drivers/Makefile
+          echo "== 新版 Kconfig 里的配置名 =="
+          grep -nE '^\s*(config|bool|tristate)' drivers/kernelsu/Kconfig | head -30
+
+      - name: '5. 下载 clang 工具链'
+        run: |
+          mkdir -p tc && cd tc
+          URL="https://github.com/ZyCromerZ/Clang/releases/download/${{ inputs.clang_ver }}-release/Clang-${{ inputs.clang_ver }}.tar.gz"
+          echo "下载: $URL"
+          curl -fL --retry 3 -o clang.tar.gz "$URL"
+          ls -lh clang.tar.gz
+          mkdir -p clang
+          tar -xzf clang.tar.gz -C clang
+          echo "== 解压后的顶层结构 =="
+          ls clang | head
+          # 兼容「tarball 里多套了一层目录」的情况
+          if [ ! -x clang/bin/clang ] && [ -x "$(find clang -maxdepth 3 -type f -name clang | head -1)" ]; then
+            INNER="$(dirname "$(dirname "$(find clang -maxdepth 3 -type f -name clang | head -1)")")"
+            echo "检测到嵌套目录: $INNER"
+            mv "$INNER" clang2 && rm -rf clang && mv clang2 clang
+          fi
+          echo "== clang 版本 =="
+          ./clang/bin/clang --version || true
+          echo "TC=$PWD/clang" >> "$GITHUB_ENV"
+
+      - name: '6. 下载 GCC 工具链（32/64 位）'
+        run: |
+          cd tc
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 gcc32
+          echo "GCC64=$PWD/gcc64" >> "$GITHUB_ENV"
+          echo "GCC32=$PWD/gcc32" >> "$GITHUB_ENV"
+
+      - name: '7. 生成 .config（合并 fragment）'
+        run: |
+          cd kernel
+          export ARCH=arm64 SUBARCH=arm64
+          mkdir -p out
+
+          make O=out ARCH=arm64 vendor/sdm670-perf_defconfig
+
+          # sdm710-common.config 里带着 CONFIG_KSU=y / CONFIG_KSU_MANUAL_HOOK=y
+          ./scripts/kconfig/merge_config.sh -O out out/.config \
+            arch/arm64/configs/xiaomi/sdm710-common.config \
+            arch/arm64/configs/xiaomi/sirius.config
+
+          make O=out ARCH=arm64 olddefconfig
+
+          echo "== 关键配置确认 =="
+          grep -E 'CONFIG_KSU|CONFIG_MACH_XIAOMI_SIRIUS|CONFIG_ARCH_SDM670|CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES' out/.config || true
+
+      - name: '8. 编译内核'
+        run: |
+          cd kernel
+          export ARCH=arm64 SUBARCH=arm64
+          export PATH="$TC/bin:$PATH"
+          export CC=clang
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
+          export READELF=llvm-readelf
+
+          set -o pipefail
+          make -j"${{ inputs.jobs }}" O=out ARCH=arm64 \
+            CC=clang \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            Image.gz-dtb 2>&1 | tail -120
+
+      - name: '9. 收集产物'
+        run: |
+          cd kernel
+          echo "== arch/arm64/boot/ 内容 =="
+          ls -lh arch/arm64/boot/ | head -30
+          mkdir -p /tmp/out
+          for f in Image.gz-dtb Image-dtb Image.gz Image; do
+            [ -f "arch/arm64/boot/$f" ] && cp "arch/arm64/boot/$f" /tmp/out/ && echo "已收集 $f"
+          done
+          [ -f vmlinux ] && cp vmlinux /tmp/out/ && echo "已收集 vmlinux"
+          [ -f System.map ] && cp System.map /tmp/out/ || true
+          echo "== 产物清单 =="
+          ls -lh /tmp/out/
+
+      - name: '10. 上传产物'
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ inputs.ksu_ref || 'main' }}
+          path: /tmp/out/
+          retention-days: 14
