@@ -97,32 +97,38 @@ jobs:
         run: |
           mkdir -p tc && cd tc
 
-          # 首选 AOSP 官方 clang —— 与设备内核完全一致（clang 21.0.0 / based on r563880c）。
-          # 设备内核的 /proc/version 明确写着这个版本，用它编出来的一定能对上。
+          # clang 选型说明：
+          #   ZyCromerZ 的 clang 虽然常见，但它是「裁掉集成汇编器」的定制构建 ——
+          #   编译 .s 时会调外部 as（GCC 4.9 的 binutils 2.24），而 clang 16 生成的
+          #   DWARF-5 风格 .file 指令它不认，vDSO 必然失败，且 -integrated-as 无效。
+          #   因此优先用带完整集成汇编器的 Android 官方系 clang。
           AOSP_BASE="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive"
-          AOSP_CANDIDATES="$AOSP_BASE/refs/heads/main/clang-r563880c.tar.gz $AOSP_BASE/refs/heads/master/clang-r563880c.tar.gz"
-          ZY_URL="https://github.com/ZyCromerZ/Clang/releases/download/${{ inputs.clang_ver }}-release/Clang-${{ inputs.clang_ver }}.tar.gz"
+          CANDIDATES="
+          https://github.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-6778096/archive/refs/heads/10.0.tar.gz|crDroid clang-6778096
+          $AOSP_BASE/refs/heads/main/clang-r563880c.tar.gz|AOSP clang-r563880c
+          $AOSP_BASE/refs/heads/master/clang-r563880c.tar.gz|AOSP clang-r563880c(master)
+          https://github.com/ZyCromerZ/Clang/releases/download/${{ inputs.clang_ver }}-release/Clang-${{ inputs.clang_ver }}.tar.gz|ZyCromerZ ${{ inputs.clang_ver }}
+          "
 
           GOT=""
-          for u in $AOSP_CANDIDATES; do
-            echo "尝试 AOSP: $u"
+          for entry in $CANDIDATES; do
+            u="${entry%%|*}"
+            nm="${entry##*|}"
+            [ -z "$u" ] && continue
+            echo "尝试: $nm"
+            echo "  $u"
             code=$(curl -sL -o clang.tar.gz -w '%{http_code}' --retry 1 --max-time 900 "$u" || echo 000)
-            echo "  HTTP $code  大小 $(stat -c %s clang.tar.gz 2>/dev/null || echo 0)"
-            if [ "$code" = "200" ] && [ -s clang.tar.gz ]; then
-              GOT="AOSP clang-r563880c"; break
-            fi
+            sz=$(stat -c %s clang.tar.gz 2>/dev/null || echo 0)
+            echo "  HTTP $code  大小 $sz"
+            if [ "$code" = "200" ] && [ "$sz" -gt 1000000 ]; then GOT="$nm"; break; fi
           done
-          if [ -z "$GOT" ]; then
-            echo "AOSP 全部候选失败，回退 ZyCromerZ Clang ${{ inputs.clang_ver }}"
-            curl -fL --retry 3 --max-time 900 -o clang.tar.gz "$ZY_URL"
-            GOT="ZyCromerZ ${{ inputs.clang_ver }}"
-          fi
+          if [ -z "$GOT" ]; then echo "!! 所有 clang 源都下载失败"; exit 1; fi
           echo "使用: $GOT"
           echo "CLANG_SRC=$GOT" >> "$GITHUB_ENV"
           ls -lh clang.tar.gz
 
           mkdir -p clang
-          tar -xzf clang.tar.gz -C clang
+          tar -xzf clang.tar.gz -C clang --strip-components=0 2>/dev/null || tar -xzf clang.tar.gz -C clang
           echo "== 解压后顶层 =="
           ls clang | head
 
@@ -137,8 +143,18 @@ jobs:
 
           echo "== clang 版本 =="
           ./clang/bin/clang --version || true
-          echo "== 默认汇编器配置（看是否 integrated-as）=="
-          ./clang/bin/clang -### -c -x assembler /dev/null 2>&1 | grep -oE 'integrated-as|"-[^"]*as[^"]*"|/bin/as' | head -5 || true
+
+          # 关键校验：必须自带集成汇编器，否则 vDSO 又会挂
+          echo "== 集成汇编器能力检测 =="
+          printf '.text\n' > /tmp/probe.s
+          if ./clang/bin/clang -c -x assembler /tmp/probe.s -o /tmp/probe.o >/dev/null 2>&1; then
+            echo "  OK 可以汇编（未调用外部 as）"
+            ./clang/bin/clang -### -c -x assembler /tmp/probe.s -o /tmp/probe.o 2>&1 | grep -c 'integrated-as' | sed 's/^/  integrated-as 出现次数: /'
+          else
+            echo "  !! 无法汇编，可能仍走外部 as"
+            ./clang/bin/clang -### -c -x assembler /tmp/probe.s -o /tmp/probe.o 2>&1 | tail -5
+          fi
+
           echo "TC=$PWD/clang" >> "$GITHUB_ENV"
 
       - name: '6. 下载 GCC 工具链（32/64 位）'
