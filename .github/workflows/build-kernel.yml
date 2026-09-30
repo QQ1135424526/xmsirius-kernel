@@ -74,12 +74,16 @@ jobs:
           # 先挪走备份，万一新版装不上可以回退（仓库自带的 vendored 版本是能编译的）
           mv drivers/kernelsu /tmp/ksu_orig
 
-          if [ -n "${{ inputs.ksu_ref }}" ]; then
-            git clone --depth=1 -b "${{ inputs.ksu_ref }}" \
-              https://github.com/rsuntk/KernelSU /tmp/ksu
-          else
-            git clone --depth=1 https://github.com/rsuntk/KernelSU /tmp/ksu
+          # 注意：留空 = 跳过替换（真·基线构建）。
+          # 早先的写法是「留空就 clone main」，那其实仍然是替换，永远拿不到基线。
+          if [ -z "${{ inputs.ksu_ref }}" ] || [ "${{ inputs.ksu_ref }}" = "none" ]; then
+            echo "ksu_ref 为空/none ⇒ 跳过 KSU 替换，使用仓库自带版本（基线构建）"
+            mv /tmp/ksu_orig drivers/kernelsu
+            echo "KSU_UPGRADED=no" >> "$GITHUB_ENV"
+            exit 0
           fi
+          git clone --depth=1 -b "${{ inputs.ksu_ref }}" \
+            https://github.com/rsuntk/KernelSU /tmp/ksu
           echo "== rsuntk/KernelSU HEAD =="
           git -C /tmp/ksu log --oneline -1
 
@@ -108,6 +112,41 @@ jobs:
           grep -n 'kernelsu/' drivers/Makefile
           echo "== 新版 Kconfig 里的配置名 =="
           grep -nE '^\s*(config|bool|tristate)' drivers/kernelsu/Kconfig | head -30
+
+      - name: '4b. 修补 hooks.c（新版 KernelSU 已移除 is_ksu_transition）'
+        run: |
+          cd kernel
+          python3 - <<'PY'
+          import re, sys
+          p = 'security/selinux/hooks.c'
+          s = open(p, encoding='utf-8', errors='replace').read()
+          pat = re.compile(
+              r'#ifdef CONFIG_KSU\n'
+              r'extern bool is_ksu_transition\(const struct task_security_struct \*old_tsec,\n'
+              r'\s*const struct task_security_struct \*new_tsec\);\n'
+              r'#endif\n'
+          )
+          repl = (
+              '#ifdef CONFIG_KSU\n'
+              '/* patched by CI: 新版 KernelSU 已移除 is_ksu_transition()。\n'
+              ' * 新 KSU 改为运行时注入 SELinux 策略来放行 su 域转换，不再需要该钩子。\n'
+              ' * 这里补一个 static 桩，满足内核树自带的调用点（check_nnp_nosuid）。 */\n'
+              'static bool is_ksu_transition(const struct task_security_struct *old_tsec __maybe_unused,\n'
+              '                              const struct task_security_struct *new_tsec __maybe_unused)\n'
+              '{\n'
+              '\treturn false;\n'
+              '}\n'
+              '#endif\n'
+          )
+          s2, n = pat.subn(repl, s)
+          if n != 1:
+              print('!! hooks.c 补丁未命中（替换 %d 处），需要人工核对' % n)
+              sys.exit(1)
+          open(p, 'w', encoding='utf-8').write(s2)
+          print('hooks.c 补丁完成，替换 1 处')
+          PY
+          echo "== 校验补丁结果 =="
+          grep -n -A7 'static bool is_ksu_transition' security/selinux/hooks.c
 
       - name: '5. 下载 clang 工具链'
         run: |
