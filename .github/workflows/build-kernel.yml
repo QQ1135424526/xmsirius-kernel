@@ -184,6 +184,70 @@ jobs:
           grep -n 'KERNEL_SU_UAPI_VERSION\|KSU_IOCTL_GET_INFO' kernel/drivers/kernelsu/include/uapi/supercall.h
           grep -n 'uapi_version\|GET_INFO_LEGACY' kernel/drivers/kernelsu/supercall/dispatch.c
 
+      - name: '4e. 把 stop_execve_hook 挪到 boot_completed（修复 services 阶段被 SELinux 拒绝）'
+        run: |
+          # 本机实测：KernelSU 的 execve kprobe 会在 init 执行 ksud 时先把进程 cred
+          # 提到 u:r:ksu:s0（日志 "escape to root for init executing ksud"），
+          # 于是后续 selinux_bprm_creds_for_exec 看到 old==new，不触发 bounded transition。
+          #
+          # 但原代码在【第一次 exec zygote】时就把这个 kprobe 停掉了（实测 9.9s）：
+          #     if (first_zygote && ... "-Xzygote") { on_post_fs_data(); stop_execve_hook(); }
+          # 而 services 触发是 vold.decrypt=trigger_restart_framework（实测 12.2s），
+          # 此时 kprobe 已停 ⇒ 走正常 SELinux 路径 ⇒
+          #     type=1401 audit: op=security_bounded_transition seresult=denied
+          #                     oldcontext=u:r:init:s0 newcontext=u:r:ksu:s0
+          #     init: cannot execv('/data/adb/ksud') ... Permission denied
+          # ⇒ KernelSU 的 services 阶段永远不执行 ⇒ 所有模块的 service.sh 都不跑。
+          #
+          # 修法：把 kprobe 的停止点从「zygote 启动」挪到「boot_completed」。
+          # 时机完全不变，只是让 services / boot-completed 这两次 exec 也能被 kprobe 接管。
+          cd kernel
+          python3 - <<'PY'
+          import re, sys
+          p = 'runtime/ksud.c'
+          s = open(p, encoding='utf-8', errors='replace').read()
+
+          # 1) 从 zygote 检测块里移除 stop_execve_hook()
+          pat = re.compile(
+              r'(pr_info\("exec zygote, /data prepared, second_stage: %d\\n", init_second_stage_executed\);\n'
+              r'\s*on_post_fs_data\(\);\n'
+              r'\s*first_zygote = false;\n)'
+              r'\s*stop_execve_hook\(\);\n'
+          )
+          repl = (
+              r'\1'
+              '            /* patched by CI: 不在这里停 kprobe，见 on_boot_completed() 的说明 */\n'
+          )
+          s2, n = pat.subn(repl, s)
+          if n != 1:
+              print('!! zygote 块未命中（替换 %d 处），需要人工核对' % n)
+              sys.exit(1)
+
+          # 2) 改到 on_boot_completed() 里停
+          pat2 = re.compile(
+              r'(void on_boot_completed\(void\)\n\{\n)'
+              r'(\s*ksu_boot_completed = true;\n)'
+          )
+          repl2 = (
+              r'\1'
+              r'\2'
+              '    /* patched by CI: 原来在 zygote 启动时就停掉 execve kprobe，\n'
+              '     * 导致 vold.decrypt=trigger_restart_framework（services 阶段）触发时\n'
+              '     * init 无法被 kprobe 接管，SELinux bounded transition 直接拒绝。\n'
+              '     * 挪到这里：boot-completed 这次 exec 已经成功，之后不再需要该 kprobe。 */\n'
+              '    stop_execve_hook();\n'
+          )
+          s3, n2 = pat2.subn(repl2, s2)
+          if n2 != 1:
+              print('!! on_boot_completed 未命中（替换 %d 处），需要人工核对' % n2)
+              sys.exit(1)
+
+          open(p, 'w', encoding='utf-8').write(s3)
+          print('ksud.c 补丁完成：zygote 块移除 1 处，on_boot_completed 新增 1 处')
+          PY
+          echo "== 校验补丁结果 =="
+          grep -n -B2 -A4 'stop_execve_hook();' runtime/ksud.c
+
       - name: '5. 下载 clang 工具链'
         run: |
           mkdir -p tc && cd tc
