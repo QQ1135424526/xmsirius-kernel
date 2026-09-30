@@ -148,6 +148,23 @@ jobs:
           echo "== 校验补丁结果 =="
           grep -n -A7 'static bool is_ksu_transition' security/selinux/hooks.c
 
+      - name: '4c. 对齐 KSU_VERSION（消除管理器「版本不匹配」提示）'
+        run: |
+          cd kernel
+          MF=drivers/kernelsu/Makefile
+          if [ ! -f "$MF" ]; then
+            echo "!! 找不到 $MF（新版 KSU 结构可能不同）"
+            grep -rn 'KSU_VERSION' drivers/kernelsu/ 2>/dev/null | head -5
+            exit 1
+          fi
+          echo "== 改前 =="
+          grep -n 'KSU_VERSION' "$MF"
+          # 管理器装的是官方 v3.2.3 (versionCode 32455)，让内核侧对齐即可消除提示
+          sed -i 's/-DKSU_VERSION=[0-9]\+/-DKSU_VERSION=32455/' "$MF"
+          echo "== 改后 =="
+          grep -n 'KSU_VERSION' "$MF"
+          grep -q 'KSU_VERSION=32455' "$MF" || { echo "!! 替换失败"; exit 1; }
+
       - name: '5. 下载 clang 工具链'
         run: |
           mkdir -p tc && cd tc
