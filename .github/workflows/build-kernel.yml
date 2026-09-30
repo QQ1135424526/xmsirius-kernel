@@ -31,6 +31,9 @@ jobs:
     timeout-minutes: 150
 
     steps:
+      - name: '0a. 检出本仓库（取补丁脚本 scripts/patch-uapi.py）'
+        uses: actions/checkout@v4
+
       - name: '0. 环境与磁盘'
         run: |
           echo "== CPU / 内存 =="; nproc; free -h
@@ -166,6 +169,20 @@ jobs:
           grep -q 'KSU_VERSION=32601' "$MF" || { echo "!! 替换失败"; exit 1; }
           echo "== 顺带确认 uapi/头文件里有无独立版本宏 =="
           grep -rn 'UAPI_VERSION' drivers/kernelsu/ 2>/dev/null | head -5 || echo "  （无 UAPI_VERSION 宏）"
+
+      - name: '4d. 补齐 uapi_version（消除管理器两条红色告警）'
+        run: |
+          # 官方管理器 get_info()：先调新 ioctl（4 字段结构, size=16），失败才回退
+          # legacy（3 字段, size=0）并把 uapi_version 显式置 0。
+          # 而 rsuntk 的 KSU_IOCTL_GET_INFO 号恰好就是 size=0 的那个 ⇒ 必然回退、
+          # uapi 必然读成 0。管理器据此同时弹出「uapi 不匹配」与「版本过低」两条红框
+          # （requiresNewKernel 同时控制这两条）。
+          # 补上 uapi_version=2 即让两条同时消失。完整推导见 scripts/patch-uapi.py 顶部。
+          python3 "$GITHUB_WORKSPACE/scripts/patch-uapi.py" kernel/drivers/kernelsu
+
+          echo "== 补丁结果自检 =="
+          grep -n 'KERNEL_SU_UAPI_VERSION\|KSU_IOCTL_GET_INFO' kernel/drivers/kernelsu/include/uapi/supercall.h
+          grep -n 'uapi_version\|GET_INFO_LEGACY' kernel/drivers/kernelsu/supercall/dispatch.c
 
       - name: '5. 下载 clang 工具链'
         run: |
