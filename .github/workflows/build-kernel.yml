@@ -341,16 +341,26 @@ jobs:
       - name: '9. 收集产物'
         run: |
           cd kernel
-          echo "== arch/arm64/boot/ 内容 =="
-          ls -lh arch/arm64/boot/ | head -30
+          # ⚠️ 编译用了 O=out，产物在 out/arch/arm64/boot/，
+          #    不是 arch/arm64/boot/（那里只有源码：Makefile / dts / install.sh）。
+          #    早先写成 arch/arm64/boot/ 导致「编译成功但产物清单为空」。
+          echo "== out/arch/arm64/boot/ 内容 =="
+          ls -lh out/arch/arm64/boot/ | head -30
           mkdir -p /tmp/out
-          for f in Image.gz-dtb Image-dtb Image.gz Image; do
-            [ -f "arch/arm64/boot/$f" ] && cp "arch/arm64/boot/$f" /tmp/out/ && echo "已收集 $f"
+          for f in Image Image.gz Image.gz-dtb Image-dtb; do
+            if [ -f "out/arch/arm64/boot/$f" ]; then
+              cp "out/arch/arm64/boot/$f" /tmp/out/
+              echo "已收集 $f"
+            fi
           done
-          [ -f vmlinux ] && cp vmlinux /tmp/out/ && echo "已收集 vmlinux"
-          [ -f System.map ] && cp System.map /tmp/out/ || true
+          [ -f out/System.map ] && cp out/System.map /tmp/out/ && echo "已收集 System.map"
           echo "== 产物清单 =="
           ls -lh /tmp/out/
+          # 必须至少有一个内核镜像，否则直接失败（别让「空产物」被当成成功）
+          if [ ! -f /tmp/out/Image ] && [ ! -f /tmp/out/Image.gz-dtb ]; then
+            echo "!! 没有收集到任何内核镜像，构建视为失败"
+            exit 1
+          fi
 
       - name: '10. 上传产物'
         uses: actions/upload-artifact@v4
@@ -358,3 +368,4 @@ jobs:
           name: kernel-${{ inputs.ksu_ref || 'main' }}
           path: /tmp/out/
           retention-days: 14
+          if-no-files-found: error
