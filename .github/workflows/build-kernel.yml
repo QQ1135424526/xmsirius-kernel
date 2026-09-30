@@ -159,11 +159,13 @@ jobs:
           fi
           echo "== 改前 =="
           grep -n 'KSU_VERSION' "$MF"
-          # 管理器装的是官方 v3.2.3 (versionCode 32455)，让内核侧对齐即可消除提示
-          sed -i 's/-DKSU_VERSION=[0-9]\+/-DKSU_VERSION=32455/' "$MF"
+          # 管理器是官方 v3.3.0 (versionCode 32601)，让内核侧对齐
+          sed -i 's/-DKSU_VERSION=[0-9]\+/-DKSU_VERSION=32601/' "$MF"
           echo "== 改后 =="
           grep -n 'KSU_VERSION' "$MF"
-          grep -q 'KSU_VERSION=32455' "$MF" || { echo "!! 替换失败"; exit 1; }
+          grep -q 'KSU_VERSION=32601' "$MF" || { echo "!! 替换失败"; exit 1; }
+          echo "== 顺带确认 uapi/头文件里有无独立版本宏 =="
+          grep -rn 'UAPI_VERSION' drivers/kernelsu/ 2>/dev/null | head -5 || echo "  （无 UAPI_VERSION 宏）"
 
       - name: '5. 下载 clang 工具链'
         run: |
