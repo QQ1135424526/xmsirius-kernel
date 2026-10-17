@@ -15,7 +15,7 @@ on:
       ksu_ref:
         description: 'rsuntk/KernelSU 的 tag 或 commit（留空 = main 最新）'
         required: false
-        default: 'v3.2.2-10-legacy'
+        default: 'main'
       clang_ver:
         description: 'ZyCromerZ Clang 版本（形如 16.0.6-20260807）'
         required: true
@@ -162,11 +162,11 @@ jobs:
           fi
           echo "== 改前 =="
           grep -n 'KSU_VERSION' "$MF"
-          # 管理器是官方 v3.3.0 (versionCode 32601)，让内核侧对齐
-          sed -i 's/-DKSU_VERSION=[0-9]\+/-DKSU_VERSION=32601/' "$MF"
+          # 管理器是官方 v3.3.1 (versionCode 32680)，让内核侧对齐
+          sed -i 's/-DKSU_VERSION=[0-9]\+/-DKSU_VERSION=32680/' "$MF"
           echo "== 改后 =="
           grep -n 'KSU_VERSION' "$MF"
-          grep -q 'KSU_VERSION=32601' "$MF" || { echo "!! 替换失败"; exit 1; }
+          grep -q 'KSU_VERSION=32680' "$MF" || { echo "!! 替换失败"; exit 1; }
           echo "== 顺带确认 uapi/头文件里有无独立版本宏 =="
           grep -rn 'UAPI_VERSION' drivers/kernelsu/ 2>/dev/null | head -5 || echo "  （无 UAPI_VERSION 宏）"
 
@@ -360,6 +360,9 @@ jobs:
             arch/arm64/configs/xiaomi/sdm710-common.config \
             arch/arm64/configs/xiaomi/sirius.config
 
+          # 关闭 adb_root 特性：其实现依赖 current_user_stack_pointer()，
+          # 本机 4.9 内核树没有该宏（adb_root.h 在关闭时提供 no-op 桩，安全）
+          echo "# CONFIG_KSU_FEATURE_ADBROOT is not set" >> out/.config
           make O=out ARCH=arm64 olddefconfig
 
           echo "== 关键配置确认 =="
