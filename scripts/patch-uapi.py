@@ -102,7 +102,7 @@ def main():
     )
     new_struct = (
         "/* patched by CI: 官方管理器按 4 字段读取，缺此字段会被当成 uapi 0 */\n"
-        "DECLARE(__u32, KERNEL_SU_UAPI_VERSION, 2);\n"
+        "DECLARE(__u32, KERNEL_SU_UAPI_VERSION, 5);\n"
         "\n"
         "struct ksu_get_info_cmd {\n"
         "    __u32 version; /* Output: KERNEL_SU_VERSION */\n"
@@ -145,7 +145,7 @@ def main():
     old_set = "    cmd.features = KSU_FEATURE_MAX;\n"
     new_set = (
         "    cmd.features = KSU_FEATURE_MAX;\n"
-        "    /* patched by CI: 上报 uapi 版本，与官方管理器 (uapi 2) 对齐 */\n"
+        "    /* patched by CI: 上报 uapi 版本，与官方管理器 (uapi 5) 对齐 */\n"
         "    cmd.uapi_version = KERNEL_SU_UAPI_VERSION;\n"
     )
     n = t.count(old_set)
@@ -210,7 +210,7 @@ def main():
     h = open(hdr, encoding='utf-8').read()
     d = open(dsp, encoding='utf-8').read()
     checks = [
-        ('supercall.h 定义 KERNEL_SU_UAPI_VERSION = 2', 'KERNEL_SU_UAPI_VERSION, 2' in h),
+        ('supercall.h 定义 KERNEL_SU_UAPI_VERSION = 5', 'KERNEL_SU_UAPI_VERSION, 5' in h),
         ('supercall.h 结构体含 uapi_version 字段', 'uapi_version; /* Output' in h),
         ('supercall.h 新增 legacy 结构体', 'ksu_get_info_legacy_cmd' in h),
         ('supercall.h GET_INFO 号已改为 _IOR', "_IOR('K', 2, struct ksu_get_info_cmd)" in h),
